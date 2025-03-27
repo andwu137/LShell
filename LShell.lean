@@ -36,7 +36,7 @@ def
 parse_line
 (line : String)
 : Option (String × Array String) :=
-  get_args line >>= λxs =>
+  get_args line.trimLeft >>= λxs =>
     match xs with
     | [] => none
     | cmd :: rest => some (cmd, rest.toArray)
