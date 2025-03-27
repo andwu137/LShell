@@ -31,7 +31,6 @@ get_args
       | c => add_to_front c <$> go cs quoted
   List.map (λx => String.mk x) <$> go input.toList False
 
--- TODO: handle EOF
 def
 parse_line
 (line : String)
@@ -60,32 +59,34 @@ shell_loop
     stdout.flush
 
     let line ← (String.dropRight . 1) <$> stdin.getLine
-    if line.trim ≠ "" then
-      match parse_line line with
-      | none => stdout.putStrLn "unable to parse"
-      -- Builtins
-      | some ("cd", args) =>
-        match h : args.size with
-        | 0 => shell_cd [envp.home]
-        | 1 =>
-          have hx : 0 < args.size := by omega
-          if args[0]'hx == "~" then shell_cd [envp.home] else
-          shell_cd [args[0]'hx]
-        | _ => stderr.putStrLn "cd: too many arguments"
-      -- Binaries
-      | some (cmd, args) => do
-        let file ← IO.FS.Stream.ofHandle <$> IO.FS.Handle.mk "/home/ufedora/personal/playground/lean/shell.out" IO.FS.Mode.append -- TODO: remove the test for stdout redirection
-        let spawn_args := {
-          cmd := cmd,
-          args := args,
-          env := Array.mk [
-            ("USER", envp.user),
-            ("PATH", envp.path),
-            ("HOME", envp.home)
-          ],
-        }
-        let child ← IO.Process.spawn spawn_args -- TODO: dont fork before checking if the cmd exists
-        let exitCode ← tryCatch (child.wait) (λe => stdout.putStrLn e.toString *> pure 0)
+    if line == "" then break -- EOF
+    if line.trim == "" then continue -- Empty
+
+    match parse_line line with
+    | none => stdout.putStrLn "unable to parse"
+    -- Builtins
+    | some ("cd", args) =>
+      match h : args.size with
+      | 0 => shell_cd [envp.home]
+      | 1 =>
+        have hx : 0 < args.size := by omega
+        if args[0]'hx == "~" then shell_cd [envp.home] else
+        shell_cd [args[0]'hx]
+      | _ => stderr.putStrLn "cd: too many arguments"
+    -- Binaries
+    | some (cmd, args) => do
+      let file ← IO.FS.Stream.ofHandle <$> IO.FS.Handle.mk "/home/ufedora/personal/playground/lean/shell.out" IO.FS.Mode.append -- TODO: remove the test for stdout redirection
+      let spawn_args := {
+        cmd := cmd,
+        args := args,
+        env := Array.mk [
+          ("USER", envp.user),
+          ("PATH", envp.path),
+          ("HOME", envp.home)
+        ],
+      }
+      let child ← IO.Process.spawn spawn_args -- TODO: dont fork before checking if the cmd exists
+      let exitCode ← tryCatch (child.wait) (λe => stdout.putStrLn e.toString *> pure 0)
 
 def
 main
