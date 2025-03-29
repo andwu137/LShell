@@ -1,17 +1,20 @@
+import Std.Data
+
 structure ShellEnv where
   user : Option String
   path : String
   home : String
 
 -- TODO: create a shell language
-def
+partial def
 get_args
 (input : String)
-: Option (List String) :=
-  let add_to_front (c : Char) (ls : List (List Char)) :=
-    match ls with
+(aliases : Std.HashMap String String)
+: Option (String × List String) := do
+  let add_to_front (c : Char) := λ
     | [] => [[c]]
     | x :: xs => (c :: x) :: xs
+
   let rec go (it : List Char) (quoted : Bool) : Option (List (List Char)) :=
     match it with
     | [] => if quoted then none else some [] -- TODO: prevent the shell from running, but do a multiline parse
@@ -29,16 +32,20 @@ get_args
         | [] => if quoted then none else some []
         | c' :: cs' => add_to_front c' <$> go cs' quoted
       | c => add_to_front c <$> go cs quoted
-  List.map (λx => String.mk x) <$> go input.toList False
+
+  List.map (λx => String.mk x) <$> go input.toList False >>= λ
+  | [] => none
+  | cmd :: rest =>
+    match aliases.get? cmd with
+    | none => (cmd, rest)
+    | some als => get_args als aliases >>= λx => x.map id (. ++ rest)
 
 def
 parse_line
 (line : String)
+(aliases : Std.HashMap String String)
 : Option (String × Array String) :=
-  get_args line.trimLeft >>= λxs =>
-    match xs with
-    | [] => none
-    | cmd :: rest => some (cmd, rest.toArray)
+  get_args line.trimLeft aliases >>= λx => x.map id List.toArray
 
 def
 shell_cd
@@ -52,6 +59,8 @@ shell_loop
 (stderr : IO.FS.Stream)
 (envp : ShellEnv)
 : IO Unit := do
+  let mut aliases: Std.HashMap String String := Std.HashMap.empty
+
   repeat
     let curr_path ← IO.Process.getCurrentDir
     stdout.putStrLn $ String.join ["\n", curr_path.toString]
@@ -62,7 +71,7 @@ shell_loop
     if line == "" then break -- EOF
     if line.trim == "" then continue -- Empty
 
-    match parse_line line with
+    match parse_line line aliases with
     | none => stdout.putStrLn "unable to parse"
     -- Builtins
     | some ("cd", args) =>
