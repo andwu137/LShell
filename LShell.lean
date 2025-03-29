@@ -91,7 +91,7 @@ shell_loop
         env := Array.mk [
           ("USER", envp.user),
           ("PATH", envp.path),
-          ("HOME", envp.home)
+          ("HOME", envp.home),
         ],
       }
       let child ← IO.Process.spawn spawn_args -- TODO: dont fork before checking if the cmd exists
