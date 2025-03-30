@@ -252,7 +252,11 @@ run
 : IO Unit := do
   let stdin ← IO.getStdin
   let stdout ← IO.getStdout
-  let stderr ← IO.getStderr
+  let temp_stderr ← IO.getStderr
+  let stderr := {
+    temp_stderr with
+    putStr := λx => temp_stderr.putStr "ERROR(lshell): " *> temp_stderr.putStr x
+  }
 
   let env_user ← IO.getEnv "USER"
   let env_path ← IO.getEnv "PATH"
