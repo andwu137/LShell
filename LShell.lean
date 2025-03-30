@@ -98,6 +98,31 @@ shell_cd
 (path : List String)
 : IO Unit := IO.Process.setCurrentDir (System.mkFilePath path)
 
+def
+path_list
+(path : String)
+: List String := path.split (. == ':') -- WARN: not handling escaped ':'
+
+-- PERF: inefficient walk over paths
+-- we even regenerate path names from the ':' delimited string
+-- path are stored in a list
+def
+bin_exists
+(cmd : String)
+(path : List String)
+: IO Bool := do
+  let f (x : String) : IO Bool := do
+    let p := System.FilePath.mk x
+    let p_exists ← p.pathExists
+    if !p_exists || !p.isAbsolute then pure False else
+
+    let is_dir ← p.isDir
+    if !is_dir then pure False else
+
+    let dirents ← p.readDir
+    pure $ dirents.any (λd => d.fileName == cmd)
+  List.anyM f path
+
 partial def
 get_line
 (io : Stdio)
@@ -105,13 +130,12 @@ get_line
 : IO (Option String) := do
   let write (arr : Array UInt8) : IO Unit := io.stdout.write (ByteArray.mk arr)
   let failed (x : String) : IO Unit :=
-    /- io.stdout.putStrLn $ "UNHANDLED " ++ x -/
+    /- io.stderr.putStrLn $ "UNHANDLED " ++ x -/
     pure ()
 
   let curr_path ← IO.Process.getCurrentDir
   io.stdout.putStrLn $ String.join ["\n", curr_path.toString]
   io.stdout.putStr envp.prompt_default
-  io.stdout.flush
 
   let mut eof : Bool := False
   let mut line := ""
@@ -145,7 +169,7 @@ get_line
         line := start ++ ending
         cursor_x := cursor_x - 1
 
-    | 0x1B => do -- ESC -- TODO: finish
+    | 0x1B => do -- ESC -- TODO: finish escapes
       let read_1 ← io.stdin.read 1
       if h : read_1.size <= 0 then eof := True break else
       have hl : 0 < read_1.size := by omega
@@ -166,14 +190,14 @@ get_line
           | c => failed $ toString c
       | c => failed $ toString c
 
-    | ic => do -- TODO: ASCII / VT
-      if Char.char8_is_print ic
-        then do
+    | ic => do -- TODO: ascii / vt
+      if Char.char8_is_print ic then do
           let c := Char.ofUInt8 ic
           io.stdout.putStr $ c.toString
           line := line.push $ c
           cursor_x := cursor_x + 1
-        else io.stdout.putStrLn $ toString ic
+      else -- TODO: unicode?
+          failed $ toString ic
   pure (if eof then none else some line)
 
 partial def
@@ -192,7 +216,7 @@ shell_loop
       if line.trim == "" then continue
 
       match parse_line line aliases with
-      | none => io.stdout.putStrLn "unable to parse"
+      | none => io.stderr.putStrLn "unable to parse"
       -- Builtins
       | some ("cd", args) =>
         match h : args.size with
@@ -214,10 +238,14 @@ shell_loop
             ("HOME", envp.home),
           ] ++ envp.extras,
         }
-        let child ← IO.Process.spawn spawn_args -- TODO: dont fork before checking if the cmd exists
-        let exitCode ← tryCatch
-          child.wait
-          (λe => io.stdout.putStrLn e.toString *> pure 0)
+        let cmd_exists ← bin_exists cmd (path_list envp.path)
+        if cmd_exists then
+          let child ← IO.Process.spawn spawn_args
+          let exitCode ← tryCatch
+            child.wait
+            (λe => io.stderr.putStrLn e.toString *> pure 0)
+        else
+          io.stderr.putStrLn (cmd ++ ": command not found")
 
 def
 run
