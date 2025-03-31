@@ -11,6 +11,10 @@ structure Stdio where
   stdout : IO.FS.Stream
   stderr : IO.FS.Stream
 
+inductive ShellLang where
+  | sh
+  | scheme
+
 structure ShellEnv where
   user : Option String
   path : String
@@ -19,6 +23,7 @@ structure ShellEnv where
   prompt_default : String
   prompt_continuation : String
   prompt_select : String
+  shell_lang : ShellLang
   extras : Array (String × Option String)
 
 namespace IO
@@ -43,60 +48,12 @@ char8_is_print
 end Char
 
 namespace LShell
--- TODO: create a shell language
-def
-get_args
-(input : String)
-(aliases : Std.HashMap String String)
-: Option (String × List String) := do
-  let add_to_front (c : Char) := λ
-    | [] => [[c]]
-    | x :: xs => (c :: x) :: xs
-
-  let rec go (it : List Char) (quoted : Bool) : Option (List (List Char)) :=
-    match it with
-    | [] => if quoted then none else some [] -- TODO: prevent the shell from running, but do a multiline parse
-    | c :: cs =>
-      -- TODO: parse: pipe, background
-      match c with
-      | '"' =>
-        go cs (not quoted)
-      | ' ' =>
-        if quoted
-          then add_to_front c <$> go cs quoted
-          else List.cons [] <$> go cs quoted
-      | '\\' =>
-        match cs with
-        | [] => if quoted then none else some []
-        | c' :: cs' => add_to_front c' <$> go cs' quoted
-      | c => add_to_front c <$> go cs quoted
-
-  let split_spaces (str : String) : Option (List String) :=
-    List.map String.mk <$> go str.toList False
-
-  split_spaces input >>= λ -- initial
-  | [] => none
-  | cmd :: rest => -- success
-    match aliases.get? cmd with
-    | none => (cmd, rest) -- no alias
-    | some als => -- alias
-      split_spaces als >>= λ
-      | [] => match rest with -- empty alias
-        | [] => none -- empty rest
-        | new_cmd :: new_rest => some (new_cmd, new_rest)
-      | new_cmd :: new_rest => some (new_cmd, new_rest ++ rest)
-
-def
-parse_line
-(line : String)
-(aliases : Std.HashMap String String)
-: Option (String × Array String) :=
-  get_args line.trimLeft aliases >>= λx => x.map id List.toArray
-
+namespace Builtin
 def
 shell_cd
 (path : List String)
 : IO Unit := IO.Process.setCurrentDir (System.mkFilePath path)
+end Builtin
 
 def
 path_list
@@ -123,6 +80,7 @@ bin_exists
     pure $ dirents.any (λd => d.fileName == cmd)
   List.anyM f path
 
+namespace Lang
 partial def
 get_line
 (io : Stdio)
@@ -198,9 +156,80 @@ get_line
           cursor_x := cursor_x + 1
       else -- TODO: unicode?
           failed $ toString ic
+
   pure (if eof then none else some line)
 
-partial def
+def
+sh_get_args
+(input : String)
+(aliases : Std.HashMap String String)
+: Option (String × List String) := do
+  let add_to_front (c : Char) := λ
+    | [] => [[c]]
+    | x :: xs => (c :: x) :: xs
+
+  let rec go (it : List Char) (quoted : Bool) : Option (List (List Char)) :=
+    match it with
+    | [] => if quoted then none else some [] -- TODO: prevent the shell from running, but do a multiline parse
+    | c :: cs =>
+      -- TODO: parse: pipe, background
+      match c with
+      | '"' =>
+        go cs (not quoted)
+      | ' ' =>
+        if quoted
+          then add_to_front c <$> go cs quoted
+          else List.cons [] <$> go cs quoted
+      | '\\' =>
+        match cs with
+        | [] => if quoted then none else some []
+        | c' :: cs' => add_to_front c' <$> go cs' quoted
+      | c => add_to_front c <$> go cs quoted
+
+  let split_spaces (str : String) : Option (List String) :=
+    List.map String.mk <$> go str.toList False
+
+  split_spaces input >>= λ -- initial
+  | [] => none
+  | cmd :: rest => -- success
+    match aliases.get? cmd with
+    | none => (cmd, rest) -- no alias
+    | some als => -- alias
+      split_spaces als >>= λ
+      | [] => match rest with -- empty alias
+        | [] => none -- empty rest
+        | new_cmd :: new_rest => some (new_cmd, new_rest)
+      | new_cmd :: new_rest => some (new_cmd, new_rest ++ rest)
+
+def
+sh_parser
+(line : String)
+(aliases : Std.HashMap String String)
+: IO (Option (String × Array String)) :=
+  pure $ sh_get_args line.trimLeft aliases >>= λx => x.map id List.toArray
+
+
+def
+scheme_parser
+(line : String)
+(aliases : Std.HashMap String String)
+: IO (Option (String × Array String)) := do
+  let child ← IO.Process.spawn {
+    cmd := "./.lake/build/lshell_lang_scheme",
+    args := #[line],
+    stdin := IO.Process.Stdio.piped,
+    stdout := IO.Process.Stdio.piped,
+  }
+  child.stdin.putStrLn line
+  child.stdin.flush
+  let res ← child.stdout.readToEnd
+  let exitCode ← child.wait
+  if exitCode != 0 then pure none else
+  if res.isEmpty then pure none else
+  sh_parser res.trim aliases
+end Lang
+
+def
 shell_loop
 (io : Stdio)
 (envp : ShellEnv)
@@ -209,22 +238,27 @@ shell_loop
   aliases := aliases.insert "ls" "ls --color=auto"
 
   repeat
-    let mline ← get_line io envp
+    let mline ← Option.map String.trim <$> Lang.get_line io envp
+
     match mline with
     | none => break -- EOF
     | some line => do
-      if line.trim == "" then continue
+      if line == "" then continue
 
-      match parse_line line aliases with
+      let line ← match envp.shell_lang with
+      | ShellLang.sh => Lang.sh_parser line aliases
+      | ShellLang.scheme => Lang.scheme_parser line aliases
+
+      match line with
       | none => io.stderr.putStrLn "unable to parse"
       -- Builtins
       | some ("cd", args) =>
         match h : args.size with
-        | 0 => shell_cd [envp.home]
+        | 0 => Builtin.shell_cd [envp.home]
         | 1 =>
           have hx : 0 < args.size := by omega
-          if args[0]'hx == "~" then shell_cd [envp.home] else
-          shell_cd [args[0]'hx]
+          if args[0]'hx == "~" then Builtin.shell_cd [envp.home] else
+          Builtin.shell_cd [args[0]'hx]
         | _ => io.stderr.putStrLn "cd: too many arguments"
       | some ("exit", args) => break
       -- Binaries
@@ -265,6 +299,7 @@ run
   let env_prompt_cont ← IO.getEnv "PROMPT_CONT"
   let env_prompt_select ← IO.getEnv "PROMPT_SELECT"
   let env_prompt_command ← IO.getEnv "PROMPT_COMMAND"
+  let env_shell_lang ← IO.getEnv "SHELL_LANG"
   let env_extras ← BaseIO.toIO $
     Array.mapM
       (λx => IO.getEnv x >>= λy => pure (x, y))
@@ -284,12 +319,17 @@ run
     prompt_default := env_prompt_default.getD "$ ",
     prompt_continuation := env_prompt_cont.getD "> ",
     prompt_select := env_prompt_select.getD "#? ",
+    shell_lang := match env_shell_lang with
+      | some "scheme" => ShellLang.scheme
+      | some "sh" => ShellLang.sh
+      | _ => ShellLang.sh,
     extras := env_extras.filter (λ(_, x) => x.isSome),
   }
 
   -- TODO: setup CTRL_c interrupt callback
+  let io := {stdin, stdout, stderr}
   IO.bracket enableRawMode (λ_ => disableRawMode) $ λ_ => do
-    shell_loop {stdin, stdout, stderr} envp
+    shell_loop io envp
 end LShell
 
 def
